@@ -2,7 +2,6 @@
 # =========================================================
 # 1. Importación de Librerías e Interfaz Gráfica (Utilerías)
 # =========================================================
-
 import os
 import re
 import tkinter as tk
@@ -13,7 +12,12 @@ import pandas as pd
 import dbf  # Requisito: pip install dbf
 from datetime import datetime
 
-# --- ELIMINAMOS CONFIGURAR_VENTANA_EMERGENTE PARA EVITAR DUPLICADOS ---
+def configurar_ventana_emergente():
+    """Crea una ventana base invisible para soportar cuadros de diálogo de forma limpia."""
+    root_oculta = tk.Tk()
+    root_oculta.withdraw()
+    root_oculta.attributes("-topmost", True)
+    return root_oculta
 
 def seleccionar_archivo(ventana_padre=None):
     """Abre el explorador de archivos de Windows para seleccionar el libro de Excel."""
@@ -79,7 +83,7 @@ def buscar_tabla_oficial(wb, nombre_tabla):
 # =========================================================
 
 def seguro_int(valor):
-    """Convierte de forma segura cualquier texto o vacío a número entero sin romper el script."""
+    """Convierte de forma segura cualquier texto o vacío a número entero."""
     if not valor:
         return 0
     val_str = str(valor).strip()
@@ -91,10 +95,11 @@ def seguro_int(valor):
         return 0
 
 def exportar_a_dbf(ruta_dbf, lineas_partida):
-    """Crea físicamente el archivo .DBF asignando las columnas mediante sus índices correctos."""
+    """Mapea de forma estricta los índices de la lista generada por el TXT."""
+    ruta_dbf_fisica = os.path.normpath(ruta_dbf)
     try:
-        if os.path.exists(ruta_dbf):
-            os.remove(ruta_dbf)
+        if os.path.exists(ruta_dbf_fisica):
+            os.remove(ruta_dbf_fisica)
 
         estructura_campos = (
             'TIPPART C(10); NUMPART N(10,0); FECHA D; CODCTA C(25); TIPO C(1); '
@@ -102,35 +107,36 @@ def exportar_a_dbf(ruta_dbf, lineas_partida):
             'MONTO_AUX N(16,2); B_TIPO C(2); B_NUMERO N(10,0); B_FECHACON D; '
             'B_IMPRESIO L; CORPART N(10,0)'
         )
-
-        tabla_dbf = dbf.Table(ruta_dbf, estructura_campos, codepage='utf8')
+        tabla_dbf = dbf.Table(ruta_dbf_fisica, estructura_campos, codepage='cp850')
         tabla_dbf.open(mode=dbf.READ_WRITE)
-
+        
         for fila in lineas_partida:
-            # Extracción indexada estricta de la matriz generada en la Parte 3
             fecha_str = str(fila[2]).strip()
             fecha_pda = datetime.strptime(fecha_str, "%d/%m/%Y").date()
-            fecha_banco = dbf.Date() 
-
+            
+            b_impresio_str = str(fila[13]).upper()
+            b_impresio_bool = True if b_impresio_str in ["VERDADERO", "TRUE", "T"] else False
+            
+            fecha_banco = dbf.Date()
+            
             registro = (
-                str(fila[0]).strip(),         # TIPPART
-                seguro_int(fila[1]),          # NUMPART
-                fecha_pda,                    # FECHA
-                str(fila[3]).strip(),         # CODCTA
-                str(fila[4]).strip(),         # TIPO
-                str(fila[5]).strip(),         # CONCEPTO1
-                str(fila[6]).strip(),         # CONCEPTO2
-                str(fila[7]).strip(),         # CONCEPTO3
-                float(fila[8]),               # MONTO
-                float(fila[9]),               # MONTO_AUX
-                str(fila[10]).strip(),        # B_TIPO
-                seguro_int(fila[11]),         # B_NUMERO
-                fecha_banco,                  # B_FECHACON
-                False,                        # B_IMPRESIO (FALSO nativo booleano)
-                seguro_int(fila[14])          # CORPART
+                str(fila[0]).strip(),   # TIPPART
+                seguro_int(fila[1]),    # NUMPART
+                fecha_pda,              # FECHA
+                str(fila[3]).strip(),   # CODCTA
+                str(fila[4]).strip(),   # TIPO
+                str(fila[5]).strip(),   # CONCEPTO1
+                str(fila[6]).strip(),   # CONCEPTO2
+                str(fila[7]).strip(),   # CONCEPTO3
+                float(fila[8]),         # MONTO
+                float(fila[9]),         # MONTO_AUX
+                str(fila[10]).strip(),  # B_TIPO
+                seguro_int(fila[11]),   # B_NUMERO
+                fecha_banco,            # B_FECHACON
+                b_impresio_bool,        # B_IMPRESIO
+                seguro_int(fila[14])    # CORPART
             )
             tabla_dbf.append(registro)
-
         tabla_dbf.close()
         return True
     except Exception as e:
@@ -138,77 +144,74 @@ def exportar_a_dbf(ruta_dbf, lineas_partida):
         raise e
 
 def exportar_a_excel(ruta_excel, lineas_partida):
-    """TU PROPUESTA MAESTRA: Crea un archivo temporal DBF y clona su memoria directo a Excel sin excepciones."""
-    ruta_temporal_dbf = ruta_excel.replace(".xlsx", "_TEMP.dbf")
+    """Crea un archivo temporal DBF y clona su memoria a Excel limpiando caracteres ilegales."""
+    ruta_excel_fisica = os.path.normpath(ruta_excel)
+    ruta_temporal_dbf = os.path.normpath(ruta_excel_fisica.replace(".xlsx", "_TEMP.dbf"))
+    
     try:
-        # 1. Generamos primero el archivo dBASE perfecto usando tu motor ya blindado
+        # 1. Generamos el DBF temporal usando la función de arriba
         exportar_a_dbf(ruta_temporal_dbf, lineas_partida)
-        
+
         # 2. Leemos la tabla dBASE nativa desde el disco
         tabla_leida = dbf.Table(ruta_temporal_dbf)
         tabla_leida.open(mode=dbf.READ_ONLY)
         
-        # 3. Inicializamos un libro limpio de openpyxl
+        # 3. Inicializamos openpyxl
         libro_nuevo = openpyxl.Workbook()
         hoja_activa = libro_nuevo.active
         hoja_activa.title = "PDA"
         
-        # Escribimos los nombres de las columnas oficiales
         cabeceras = [campo for campo in tabla_leida.field_names]
         hoja_activa.append(cabeceras)
         
-        # 4. Volcamos todos los registros binarios leídos transformados en cadenas planas puras
+        # Filtro para caracteres invisibles o ilegales en celdas de Excel
+        re_limpiar_prohibidos = re.compile(r'[\x00-\x08\x0B-\x0C\x0E-\x1F\x7F-\x9F]')
+        
+        # 4. Volcamos los registros
         for registro_dbf in tabla_leida:
             fila_excel = []
             for campo in cabeceras:
                 valor_crudo = registro_dbf[campo]
                 
-                # Formateamos las fechas y booleanos para que Excel los reciba limpios
                 if isinstance(valor_crudo, datetime) or hasattr(valor_crudo, 'strftime'):
                     fila_excel.append(valor_crudo.strftime("%d/%m/%Y"))
                 elif isinstance(valor_crudo, bool):
                     fila_excel.append("FALSO" if not valor_crudo else "VERDADERO")
                 else:
-                    # Todo lo demás (incluyendo los UUID de las facturas) pasa como texto plano string limpio
-                    fila_excel.append(str(valor_crudo).strip())
-            
-            # Agregamos la fila a la hoja y forzamos el formato string para las glosas (columnas físicas 6, 7 y 8)
+                    texto_limpio = str(valor_crudo).strip()
+                    texto_limpio = re_limpiar_prohibidos.sub('', texto_limpio)
+                    fila_excel.append(texto_limpio)
+                    
             hoja_activa.append(fila_excel)
             row_idx = hoja_activa.max_row
+            
+            # --- CORRECCIÓN CRÍTICA DE SINTAXIS ---
+            # Aplicamos formato de texto plano a las columnas de concepto (6, 7 y 8) de manera legal
             for col_idx in [6, 7, 8]:
                 hoja_activa.cell(row=row_idx, column=col_idx).data_type = 's'
                 
-        # 5. Guardamos el archivo .xlsx y cerramos de forma limpia
-        libro_nuevo.save(ruta_excel)
+        # 5. Guardamos y limpiamos el temporal
+        libro_nuevo.save(ruta_excel_fisica)
         libro_nuevo.close()
         tabla_leida.close()
         
-        # 6. Mutilamos y borramos el archivo DBF temporal del disco para no dejar basura
         if os.path.exists(ruta_temporal_dbf):
             os.remove(ruta_temporal_dbf)
-            
         return True
+        
     except Exception as e:
-        # Limpieza de seguridad en caso de que ocurra un error intermedio
         if 'tabla_leida' in locals():
-            try: tabla_leida.close()
-            except: pass
+            try:
+                tabla_leida.close()
+            except:
+                pass
         if os.path.exists(ruta_temporal_dbf):
-            try: os.remove(ruta_temporal_dbf)
-            except: pass
-        print(f"Error en clonación de memoria DBF a Excel: {str(e)}")
+            try:
+                os.remove(ruta_temporal_dbf)
+            except:
+                pass
+        print(f"Error en clonación a Excel desde TXT: {str(e)}")
         raise e
-
-def seleccionar_destino_excel(ventana_padre=None):
-    """Abre una ventana flotante para elegir dónde guardar el archivo de Excel (.xlsx)"""
-    file_path = filedialog.asksaveasfilename(
-        parent=ventana_padre,
-        title="Guardar partida de diario en Excel",
-        defaultextension=".xlsx",
-        filetypes=[("Archivos de Excel", "*.xlsx")],
-        initialfile="PARTIDA_DIARIO.XLSX"
-    )
-    return file_path
 
 # =========================================================
 # 3. Procesamiento de Archivo TXT Jerárquico - PARTE A
@@ -402,11 +405,9 @@ def procesar_txt_contable(ruta_txt):
                 
     return lineas_partida
 
-
-# ==========================================
+# =========================================================
 # 4. Procesamiento de Planilla Excel Original (Indemnizaciones)
-# ==========================================
-
+# =========================================================
 def procesar_partida_diario_excel():
     """Ejecuta el flujo original basado en el libro de Excel (Indemnizaciones y Parámetros)."""
     archivo_excel = seleccionar_archivo()
@@ -417,6 +418,7 @@ def procesar_partida_diario_excel():
         print("Cargando estructuras de Tablas de Excel...")
         wb = openpyxl.load_workbook(archivo_excel)
 
+        # 1. LOCALIZAR LAS TRES TABLAS OFICIALES POR SU NOMBRE EN EL LIBRO
         ws_indem, tabla_indem = buscar_tabla_oficial(wb, "INDEMNIZACIONES")
         ws_param, tabla_param = buscar_tabla_oficial(wb, "PARAMETROS")
         ws_pda, tabla_pda = buscar_tabla_oficial(wb, "PDA")
@@ -424,10 +426,12 @@ def procesar_partida_diario_excel():
         if not ws_indem or not ws_param or not ws_pda:
             raise ValueError("No se localizó alguna de las Tablas Oficiales (INDEMNIZACIONES, PARAMETROS o PDA).")
 
+        # 2. OBTENER COORDENADAS EXACTAS CON range_boundaries
         min_col_i, min_row_i, max_col_i, max_row_i = range_boundaries(tabla_indem.ref)
         min_col_p, min_row_p, max_col_p, max_row_p = range_boundaries(tabla_param.ref)
         min_col_d, min_row_d, max_col_d, max_row_d = range_boundaries(tabla_pda.ref)
 
+        # Extracción plana de cabeceras y datos
         cabeceras_i = [str(ws_indem.cell(row=min_row_i, column=c).value).strip() for c in range(min_col_i, max_col_i + 1)]
         datos_i = [[ws_indem.cell(row=r, column=c).value for c in range(min_col_i, max_col_i + 1)] for r in range(min_row_i + 1, max_row_i + 1)]
         df_indem = pd.DataFrame(datos_i, columns=cabeceras_i)
@@ -439,6 +443,7 @@ def procesar_partida_diario_excel():
         df_indem["AREA"] = df_indem["AREA"].astype(str).str.strip()
         df_param["AREA"] = df_param["AREA"].astype(str).str.strip()
 
+        # Convertir a diccionario de parámetros normalizando las llaves
         param_dict = {}
         for idx_p, row_p in df_param.set_index("AREA").iterrows():
             area_key = str(idx_p).strip()
@@ -460,12 +465,13 @@ def procesar_partida_diario_excel():
                     param_dict[area_key][cabecera_normalizada] = cuenta_limpia
 
         lineas_partida = []
-        correlativo_partida = 1  
+        correlativo_partida = 1  # Asiento unificado por empleado
         filas_procesadas_indices = []
 
         rubros_gasto = ["SALARIO", "VACACION", "AGUINALDO", "INDEMNIZACION", "VIATICOS"]
         rubros_retencion = ["ISSS", "AFP", "ISR"]
 
+        # 3. ANALIZAR FILA POR FILA APLICANDO REGLAS DE TRUNCADO Y STATUS
         for idx, row in df_indem.iterrows():
             nombre_original = str(row["NOMBRE"]).strip()
 
@@ -476,7 +482,7 @@ def procesar_partida_diario_excel():
             if status_actual == "REGISTRADA":
                 continue
 
-            # Mapeamos la lista de Excel de forma idéntica para cumplir con los índices del nuevo Bloque 2
+            # Rellenamos de espacios vacíos fijos para no romper el motor dBASE del Bloque 2
             concepto1 = nombre_original[:40].ljust(40)
             area = str(row["AREA"]).strip()
 
@@ -490,10 +496,11 @@ def procesar_partida_diario_excel():
             fecha_partida_dinamica = fecha_baja_dt.strftime("%d/%m/%Y")
             tippart_dinamico = f"D{fecha_baja_dt.strftime('%m')}"
 
+            # Inicializadores para cuadre matemático por empleado
             total_debe_empleado = 0.0
             total_haber_retenciones = 0.0
 
-            # --- Cargos (D) ---
+            # --- Generar Cargos (D) ---
             for rubro in rubros_gasto:
                 monto = 0.0
                 for col_name in row.index:
@@ -509,7 +516,7 @@ def procesar_partida_diario_excel():
                         [tippart_dinamico, correlativo_partida, fecha_partida_dinamica, codcta, "D", concepto1, concepto2, "".ljust(40), round(monto, 2), 0.00, "", 0, "", "FALSO", 0]
                     )
 
-            # --- Abonos (H) ---
+            # --- Generar Abonos (H) de Retenciones ---
             for rubro in rubros_retencion:
                 monto = 0.0
                 for col_name in row.index:
@@ -526,8 +533,9 @@ def procesar_partida_diario_excel():
                         [tippart_dinamico, correlativo_partida, fecha_partida_dinamica, codcta, "H", concepto1, concepto2, "".ljust(40), round(monto, 2), 0.00, "", 0, "", "FALSO", 0]
                     )
             
-            # --- Abono del Neto ---
+            # --- GENERAR ABONO (H) DEL NETO DINÁMICO ---
             monto_neto_calculado = total_debe_empleado - total_haber_retenciones
+            
             if monto_neto_calculado > 0:
                 codcta_neto = param_dict[area].get("NETO", "")
                 concepto2_neto = f"NETO A PAGAR LIQ {f_ingreso} AL {f_baja_glosa}"[:40].ljust(40)
@@ -551,7 +559,7 @@ def procesar_partida_diario_excel():
             wb.close()
             return
 
-        # Actualizar tabla PDA en el libro Excel
+        # 4. LIMPIAR Y ESCRIBIR EN LA TABLA DESTINO "PDA" REDIMENSIONANDO EL OBJETO
         if ws_pda.max_row > min_row_d:
             ws_pda.delete_rows(min_row_d + 1, amount=ws_pda.max_row - min_row_d)
 
@@ -562,7 +570,7 @@ def procesar_partida_diario_excel():
         nueva_ref_pda = f"{get_column_letter(min_col_d)}{min_row_d}:{get_column_letter(max_col_d)}{min_row_d + len(lineas_partida)}"
         tabla_pda.ref = nueva_ref_pda
 
-        # Actualizar estatus en INDEMNIZACIONES
+        # 5. ACTUALIZAR ESTADO DE STATUS EN LA TABLA ORIGEN "INDEMNIZACIONES"
         col_status_idx = None
         for c in range(min_col_i, max_col_i + 1):
             if str(ws_indem.cell(row=min_row_i, column=c).value).strip().upper() == "STATUS":
@@ -572,6 +580,7 @@ def procesar_partida_diario_excel():
         if col_status_idx is None:
             raise ValueError("No se encontró la columna 'STATUS' en la Tabla Oficial INDEMNIZACIONES.")
 
+        # SOLUCIÓN DE ERROR: Usamos el nombre exacto de la lista 'filas_procesadas_indices'
         for idx_proc in filas_procesadas_indices:
             row_excel_indem = min_row_i + 1 + idx_proc
             ws_indem.cell(row=row_excel_indem, column=col_status_idx, value="REGISTRADA")
@@ -579,29 +588,23 @@ def procesar_partida_diario_excel():
         wb.save(archivo_excel)
         wb.close()
 
-        # Exportar resultado final a dBASE (.DBF)
+        # 6. EXPORTAR A dBASE
         exportar_a_dbf(ruta_guardar_dbf, lineas_partida)
 
         root_msg = configurar_ventana_emergente()
-        messagebox.showinfo("Carga Masiva Exitosa", f"Proceso Completado.\n1. Se actualizó el Excel.\n2. Archivo dBASE creado en: {ruta_guardar_dbf}")
+        messagebox.showinfo("Carga Masiva Exitosa", f"Proceso Completado Exitosamente.\n1. Se actualizó el libro de Excel con las marcas de registro.\n2. Se creó el archivo dBASE en: {ruta_guardar_dbf}")
         root_msg.destroy()
-
-    except Exception as e:
-        root_err = configurar_ventana_emergente()
-        messagebox.showerror("Error Contable / Tabla", f"Ocurrió un detalle técnico:\n{str(e)}")
-        root_err.destroy()
 
 
 # =========================================================
 # 5. Orquestador TXT y Menú Ejecutivo de Arranque Dual
 # =========================================================
-
 def ejecutar_conversion_txt(ventana_padre):
     """Orquesta la lectura del TXT y despliega la opción de guardar en DBF o en Excel utilizando la ventana padre."""
     ruta_txt = seleccionar_archivo_txt(ventana_padre)
     if not ruta_txt:
         return
-        
+
     try:
         # Procesamos el archivo contable usando el motor unificado de disco
         datos = procesar_txt_contable(ruta_txt)
@@ -628,7 +631,7 @@ def ejecutar_conversion_txt(ventana_padre):
                     messagebox.showinfo("Éxito", f"¡Partida de Diario Generada!\nArchivo guardado en: {ruta_dbf}", parent=ventana_padre)
                 except Exception as e_dbf:
                     messagebox.showerror("Error dBASE", f"No se pudo escribir el archivo DBF:\n{str(e_dbf)}", parent=ventana_padre)
-
+                    
         def guardar_formato_excel():
             ventana_opcion.destroy()
             ruta_xlsx = seleccionar_destino_excel(ventana_padre)
@@ -639,15 +642,20 @@ def ejecutar_conversion_txt(ventana_padre):
                     messagebox.showinfo("Éxito", f"¡Partida de Diario Generada!\nArchivo guardado en: {ruta_xlsx}", parent=ventana_padre)
                 except Exception as e_xlsx:
                     messagebox.showerror("Error de Excel", f"Falta la librería openpyxl o el archivo está abierto.\nPor favor ejecuta en tu consola:\npip install openpyxl\n\nDetalle: {str(e_xlsx)}", parent=ventana_padre)
-
+                    
         btn_dbf = tk.Button(ventana_opcion, text="Exportar a dBASE (.DBF)", command=guardar_formato_dbf, width=28, bg="#fff3cd")
         btn_dbf.pack(pady=3)
-        
         btn_xls = tk.Button(ventana_opcion, text="Exportar a Excel (.XLSX)", command=guardar_formato_excel, width=28, bg="#d1ecf1")
         btn_xls.pack(pady=3)
         
     except Exception as e:
         messagebox.showerror("Error de Conversión", f"Error procesando el TXT:\n{str(e)}", parent=ventana_padre)
+
+def lanzar_procesar_excel(ventana_menu):
+    """Oculta temporalmente el menú para procesar Excel y lo restaura al finalizar."""
+    ventana_menu.withdraw()
+    procesar_partida_diario_excel()
+    ventana_menu.deiconify()
 
 if __name__ == "__main__":
     ventana_menu = tk.Tk()
@@ -658,10 +666,10 @@ if __name__ == "__main__":
     lbl = tk.Label(ventana_menu, text="¿Qué tipo de archivo deseas procesar hoy?", font=("Arial", 11, "bold"), pady=15)
     lbl.pack()
     
-    btn1 = tk.Button(ventana_menu, text="Procesar Planilla (Excel a DBF)", command=lambda: [ventana_menu.destroy(), procesar_partida_diario_excel()], width=35, bg="#d4edda")
+    btn1 = tk.Button(ventana_menu, text="Procesar Planilla (Excel a DBF)", command=lambda: lanzar_procesar_excel(ventana_menu), width=35, bg="#d4edda")
     btn1.pack(pady=5)
     
-    btn2 = tk.Button(ventana_menu, text="Procesar Auxiliar de Mayor (TXT a DBF/Excel)", command=lambda: [ejecutar_conversion_txt(ventana_menu)], width=35, bg="#cce5ff")
+    btn2 = tk.Button(ventana_menu, text="Procesar Auxiliar de Mayor (TXT a DBF/Excel)", command=lambda: ejecutar_conversion_txt(ventana_menu), width=35, bg="#cce5ff")
     btn2.pack(pady=5)
     
     ventana_menu.mainloop()
